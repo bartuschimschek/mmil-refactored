@@ -12,7 +12,6 @@ from torch.distributions import kl_divergence as kl
 from multimil.distributions import MMD
 from multimil.nn import MLP, Decoder, GeneralizedSigmoid
 
-
 class MultiVAETorch(BaseModuleClass):
     """MultiMIL's multimodal integration module.
 
@@ -325,7 +324,7 @@ class MultiVAETorch(BaseModuleClass):
         return {"x": x, "cat_covs": cat_covs, "cont_covs": cont_covs}
 
     def _get_generative_input(self, tensors, inference_outputs):
-        z_joint = inference_outputs["z_joint"]
+        z = inference_outputs["z"]
 
         cont_key = REGISTRY_KEYS.CONT_COVS_KEY
         cont_covs = tensors[cont_key] if cont_key in tensors.keys() else None
@@ -333,7 +332,7 @@ class MultiVAETorch(BaseModuleClass):
         cat_key = REGISTRY_KEYS.CAT_COVS_KEY
         cat_covs = tensors[cat_key] if cat_key in tensors.keys() else None
 
-        return {"z_joint": z_joint, "cat_covs": cat_covs, "cont_covs": cont_covs}
+        return {"z": z, "cat_covs": cat_covs, "cont_covs": cont_covs}
 
     @auto_move_data
     def inference(
@@ -396,21 +395,21 @@ class MultiVAETorch(BaseModuleClass):
         logvars = [mod_out[2] for mod_out in out]
         logvar = torch.stack(logvars, dim=1)
         mu_joint, logvar_joint = self._product_of_experts(mu, logvar, masks)
-        z_joint = self._reparameterize(mu_joint, logvar_joint)
+        z = self._reparameterize(mu_joint, logvar_joint)
         # drop mus and logvars according to masks for kl calculation
         # TODO here or in loss calculation? check
         # return mus+mus_joint
-        return {"z_joint": z_joint, "mu": mu_joint, "logvar": logvar_joint, "z_marginal": z_marginal}
+        return {"z": z, "mu": mu_joint, "logvar": logvar_joint, "z_marginal": z_marginal}
 
     @auto_move_data
     def generative(
-        self, z_joint: torch.Tensor, cat_covs: torch.Tensor | None = None, cont_covs: torch.Tensor | None = None
+        self, z: torch.Tensor, cat_covs: torch.Tensor | None = None, cont_covs: torch.Tensor | None = None
     ) -> dict[str, list[torch.Tensor]]:
         """Compute necessary inference quantities.
 
         Parameters
         ----------
-        z_joint
+        z
             Tensor of values with shape ``(batch_size, z_dim)``.
         cat_covs
             Categorical covariates to condition on.
@@ -421,7 +420,7 @@ class MultiVAETorch(BaseModuleClass):
         -------
         Reconstructed values for each modality.
         """
-        z = z_joint.unsqueeze(1).repeat(1, self.n_modality, 1)
+        z = z.unsqueeze(1).repeat(1, self.n_modality, 1)
         zs = torch.split(z, 1, dim=1)
 
         if self.condition_decoders is True:
@@ -473,7 +472,7 @@ class MultiVAETorch(BaseModuleClass):
         rs = generative_outputs["rs"]
         mu = inference_outputs["mu"]
         logvar = inference_outputs["logvar"]
-        z_joint = inference_outputs["z_joint"]
+        z = inference_outputs["z"]
         z_marginal = inference_outputs["z_marginal"]  # batch_size x n_modalities x latent_dim
 
         xs = torch.split(
@@ -491,7 +490,7 @@ class MultiVAETorch(BaseModuleClass):
         else:
             integ_loss = torch.tensor(0.0).to(self.device)
             if self.mmd == "latent" or self.mmd == "both":
-                integ_loss += self._calc_integ_loss(z_joint, integrate_on).to(self.device)
+                integ_loss += self._calc_integ_loss(z, integrate_on).to(self.device)
             if self.mmd == "marginal" or self.mmd == "both":
                 for i in range(len(masks)):
                     for j in range(i + 1, len(masks)):
