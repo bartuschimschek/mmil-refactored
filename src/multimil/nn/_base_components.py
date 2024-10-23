@@ -1,117 +1,339 @@
-from math import ceil
-import numpy as np
-import pandas as pd
-import scipy
+from typing import Optional, Literal
+
 import torch
-from matplotlib import pyplot as plt
+from scvi.nn import FCLayers
+from torch import nn
+from torch.nn import functional as F
 
-def calculate_size_factor(adata, size_factor_key, rna_indices_end) -> str:
-    """Calculate size factors.
+class MLP(nn.Module):
+    """A helper class to build blocks of fully-connected, normalization, dropout and activation layers.
 
     Parameters
     ----------
-    adata
-        Annotated data object.
-    size_factor_key
-        Key in `adata.obs` where size factors are stored.
-    rna_indices_end
-        Index of the last RNA feature in the data.
+    n_input
+        Number of input features.
+    n_output
+        Number of output features.
+    n_layers
+        Number of hidden layers.
+    n_hidden
+        Number of hidden units.
+    dropout_rate
+        Dropout rate.
+    normalization
+        Type of normalization to use. Can be one of ["layer", "batch", "none"].
+    activation
+        Activation function to use.
 
-    Returns
-    -------
-    Size factor key.
     """
-    # TODO check that organize_multimodal_anndatas was run, i.e. that .uns['modality_lengths'] was added, needed for q2r
-    if size_factor_key is not None and rna_indices_end is not None:
-        raise ValueError(
-            "Only one of [`size_factor_key`, `rna_indices_end`] can be specified, but both are not `None`."
+
+    def __init__(
+        self,
+        n_input: int,
+        n_output: int,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        normalization: str = "layer",
+        activation=nn.LeakyReLU,
+    ):
+        super().__init__()
+        use_layer_norm = False
+        use_batch_norm = True
+        if normalization == "layer":
+            use_layer_norm = True
+            use_batch_norm = False
+        elif normalization == "none":
+            use_batch_norm = False
+
+        self.mlp = FCLayers(
+            n_in=n_input,
+            n_out=n_output,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            use_layer_norm=use_layer_norm,
+            use_batch_norm=use_batch_norm,
+            activation_fn=activation,
         )
-    # TODO change to when both are None and data in unimodal, use all input features to calculate the size factors, add warning
-    if size_factor_key is None and rna_indices_end is None:
-        raise ValueError("One of [`size_factor_key`, `rna_indices_end`] has to be specified, but both are `None`.")
 
-    if size_factor_key is not None:
-        return size_factor_key
-    if rna_indices_end is not None:
-        adata_rna = adata[:, :rna_indices_end].copy()
-        if scipy.sparse.issparse(adata.X):
-            adata.obs.loc[:, "size_factors"] = adata_rna.X.toarray().sum(1).T.tolist()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward computation on ``x``.
+
+        Parameters
+        ----------
+        x
+            Tensor of values with shape ``(n_input,)``.
+
+        Returns
+        -------
+        Tensor of values with shape ``(n_output,)``.
+        """
+        return self.mlp(x)
+
+class Decoder(nn.Module):
+    """A helper class to build custom decoders depending on which loss was passed.
+
+    Parameters
+    ----------
+    n_input
+        Number of input features.
+    n_output
+        Number of output features.
+    n_layers
+        Number of hidden layers.
+    n_hidden
+        Number of hidden units.
+    dropout_rate
+        Dropout rate.
+    normalization
+        Type of normalization to use. Can be one of ["layer", "batch", "none"].
+    activation
+        Activation function to use.
+    loss
+        Loss function to use. Can be one of ["mse", "nb", "zinb", "bce"].
+    """
+
+    def __init__(
+        self,
+        n_input: int,
+        n_output: int,
+        n_layers: int = 1,
+        n_hidden: int = 128,
+        dropout_rate: float = 0.1,
+        normalization: str = "layer",
+        activation=nn.LeakyReLU,
+        loss="mse",
+    ):
+        super().__init__()
+
+        if loss not in ["mse", "nb", "zinb", "bce"]:
+            raise NotImplementedError(f"Loss function {loss} is not implemented.")
         else:
-            adata.obs.loc[:, "size_factors"] = adata_rna.X.sum(1).T.tolist()
-        return "size_factors"
+            self.loss = loss
 
-def select_covariates(covs, prediction_idx, n_samples_in_batch) -> torch.Tensor:
-    """Select prediction covariates from all covariates.
+        self.decoder = MLP(
+            n_input=n_input,
+            n_output=n_hidden,
+            n_layers=n_layers,
+            n_hidden=n_hidden,
+            dropout_rate=dropout_rate,
+            normalization=normalization,
+            activation=activation,
+        )
+
+        if loss == "mse":
+            self.recon_decoder = nn.Linear(n_hidden, n_output)
+        elif loss == "nb":
+            self.mean_decoder = nn.Sequential(nn.Linear(n_hidden, n_output), nn.Softmax(dim=-1))
+        elif loss == "zinb":
+            self.mean_decoder = nn.Sequential(nn.Linear(n_hidden, n_output), nn.Softmax(dim=-1))
+            self.dropout_decoder = nn.Linear(n_hidden, n_output)
+        elif loss == "bce":
+            self.recon_decoder = FCLayers(
+                n_in=n_hidden,
+                n_out=n_output,
+                n_layers=0,
+                dropout_rate=0,
+                use_layer_norm=False,
+                use_batch_norm=False,
+                activation_fn=nn.Sigmoid,
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward computation on ``x``.
+
+        Parameters
+        ----------
+        x
+            Tensor of values with shape ``(n_input,)``.
+
+        Returns
+        -------
+        Tensor of values with shape ``(n_output,)``.
+        """
+        x = self.decoder(x)
+        if self.loss in ["mse", "bce"]:
+            return self.recon_decoder(x)
+        elif self.loss == "nb":
+            return self.mean_decoder(x)
+        elif self.loss == "zinb":
+            return self.mean_decoder(x), self.dropout_decoder(x)
+
+class GeneralizedSigmoid(nn.Module):
+    """Sigmoid, log-sigmoid or linear functions for encoding continuous covariates.
+
+    Adapted from
+    Title: CPA (c) Facebook, Inc.
+    Date: 26.01.2022
+    Link to the used code:
+    https://github.com/facebookresearch/CPA/blob/382ff641c588820a453d801e5d0e5bb56642f282/compert/model.py#L109
 
     Parameters
     ----------
-    covs : torch.Tensor
-        Covariates.
-    prediction_idx : list
-        Index of predictions.
-    n_samples_in_batch : int
-        Number of samples in the batch.
-
-    Returns
-    -------
-    torch.Tensor
-        Prediction covariates.
+    dim : int
+        Number of input features.
+    nonlin : Optional[str], optional
+        Type of non-linearity to use. Can be one of ["logsigm", "sigm", None], by default "logsigm".
     """
-    if len(prediction_idx) > 0:
-        covs = torch.index_select(covs, 1, torch.tensor(prediction_idx))
-        covs = covs.view(n_samples_in_batch, -1, len(prediction_idx))[:, 0, :]
-    else:
-        covs = torch.tensor([])
-    return covs
 
-def prep_minibatch(covs, sample_batch_size) -> tuple[int, int]:
-    """Prepare minibatch.
+    def __init__(self, dim: int, nonlin: Optional[Literal["logsigm", "sigm"]] = "logsigm"):
+        super().__init__()
+        self.nonlin = nonlin
+        if self.nonlin not in ["logsigm", "sigm", None]:
+            raise ValueError(f"Invalid nonlin value: {self.nonlin}")
+        self.beta = torch.nn.Parameter(torch.ones(1, dim), requires_grad=True)
+        self.bias = torch.nn.Parameter(torch.zeros(1, dim), requires_grad=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward computation on `x`.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor with the same shape as `x`.
+        """
+        if self.nonlin == "logsigm":
+            return (torch.log1p(x) * self.beta + self.bias).sigmoid()
+        elif self.nonlin == "sigm":
+            return (x * self.beta + self.bias).sigmoid()
+        else:
+            return x
+
+class Aggregator(nn.Module):
+    """A helper class to build custom aggregators depending on the scoring function.
 
     Parameters
     ----------
-    covs : torch.Tensor
-        Covariates.
-    sample_batch_size : int
-        Sample batch size.
-
-    Returns
-    -------
-    tuple[int, int]
-        Batch size and number of samples in the batch.
+    n_input : int
+        Number of input features.
+    scoring : str, optional
+        Scoring function to use. Can be one of ["attn", "gated_attn", "mlp", "sum", "mean", "max"], by default "gated_attn".
+    attn_dim : int, optional
+        Dimension of the hidden attention layer.
+    sample_batch_size : Optional[int], optional
+        Bag batch size.
+    scale : bool, optional
+        Whether to scale the attention weights.
+    dropout : float, optional
+        Dropout rate.
+    n_layers_mlp_attn : int, optional
+        Number of hidden layers in the MLP attention.
+    n_hidden_mlp_attn : int, optional
+        Number of hidden units in the MLP attention.
+    activation : callable, optional
+        Activation function to use.
     """
-    batch_size = covs.shape[0]
-    n_samples_in_batch = 1 if batch_size % sample_batch_size != 0 else batch_size // sample_batch_size
-    return batch_size, n_samples_in_batch
 
-def plt_plot_losses(history, loss_names, save):
-    """Plot losses.
+    def __init__(
+        self,
+        n_input: int,
+        scoring: str = "gated_attn",
+        attn_dim: int = 16,
+        sample_batch_size: Optional[int] = None,
+        scale: bool = False,
+        dropout: float = 0.2,
+        n_layers_mlp_attn: int = 1,
+        n_hidden_mlp_attn: int = 16,
+        activation=nn.LeakyReLU,
+    ):
+        super().__init__()
 
-    Parameters
-    ----------
-    history : list
-        History of losses.
-    loss_names : list
-        Loss names to plot.
-    save : str
-        Path to save the plot.
+        allowed_scoring_methods = ["attn", "gated_attn", "mlp", "sum", "mean", "max"]
+        if scoring not in allowed_scoring_methods:
+            raise ValueError(f"Invalid scoring method: {scoring}. Must be one of {allowed_scoring_methods}.")
 
-    Returns
-    -------
-    None
-    """
-    df = pd.concat(history, axis=1)
-    df.columns = df.columns.droplevel(-1)
-    df["epoch"] = df.index
+        self.scoring = scoring
+        self.patient_batch_size = sample_batch_size
+        self.scale = scale
 
-    nrows = ceil(len(loss_names) / 2)
+        if self.scoring == "attn":
+            self.attn_dim = attn_dim  # attn dim from https://arxiv.org/pdf/1802.04712.pdf
+            self.attention = nn.Sequential(
+                nn.Linear(n_input, self.attn_dim),
+                nn.Tanh(),
+                nn.Linear(self.attn_dim, 1, bias=False),
+            )
+        elif self.scoring == "gated_attn":
+            self.attn_dim = attn_dim
+            self.attention_V = nn.Sequential(
+                nn.Linear(n_input, self.attn_dim),
+                nn.Tanh(),
+            )
 
-    plt.figure(figsize=(15, 5 * nrows))
+            self.attention_U = nn.Sequential(
+                nn.Linear(n_input, self.attn_dim),
+                nn.Sigmoid(),
+            )
 
-    for i, name in enumerate(loss_names):
-        plt.subplot(nrows, 2, i + 1)
-        plt.plot(df["epoch"], df[name + "_train"], ".-", label=name + "_train")
-        plt.plot(df["epoch"], df[name + "_validation"], ".-", label=name + "_validation")
-        plt.xlabel("epoch")
-        plt.legend()
-    if save is not None:
-        plt.savefig(save, bbox_inches="tight")
+            self.attention_weights = nn.Linear(self.attn_dim, 1, bias=False)
+
+        elif self.scoring == "mlp":
+            if n_layers_mlp_attn == 1:
+                self.attention = nn.Linear(n_input, 1)
+            else:
+                self.attention = nn.Sequential(
+                    MLP(
+                        n_input,
+                        n_hidden_mlp_attn,
+                        n_layers=n_layers_mlp_attn - 1,
+                        n_hidden=n_hidden_mlp_attn,
+                        dropout_rate=dropout,
+                        activation=activation,
+                    ),
+                    nn.Linear(n_hidden_mlp_attn, 1),
+                )
+
+    def forward(self, x) -> torch.Tensor:
+        """Forward computation on `x`.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape `(batch_size, N, n_input)`.
+
+        Returns
+        -------
+        torch.Tensor
+            Aggregated output tensor of shape `(batch_size, n_input)`.
+        """
+        # Apply different pooling strategies based on the scoring method
+        if self.scoring in ["attn", "gated_attn", "mlp", "sum", "mean", "max"]:
+            if self.scoring == "attn":
+                # from https://github.com/AMLab-Amsterdam/AttentionDeepMIL/blob/master/model.py (accessed 16.09.2021)
+                A = self.attention(x)  # (batch_size, N, 1)
+                A = A.transpose(1, 2)  # (batch_size, 1, N)
+                A = F.softmax(A, dim=-1)
+            elif self.scoring == "gated_attn":
+                # from https://github.com/AMLab-Amsterdam/AttentionDeepMIL/blob/master/model.py (accessed 16.09.2021)
+                A_V = self.attention_V(x)  # (batch_size, N, attn_dim)
+                A_U = self.attention_U(x)  # (batch_size, N, attn_dim)
+                A = self.attention_weights(A_V * A_U)  # (batch_size, N, 1)
+                A = A.transpose(1, 2)  # (batch_size, 1, N)
+                A = F.softmax(A, dim=-1)
+            elif self.scoring == "mlp":
+                A = self.attention(x)  # (batch_size, N, 1)
+                A = A.transpose(1, 2)  # (batch_size, 1, N)
+                A = F.softmax(A, dim=-1)
+
+            elif self.scoring == "sum":
+                return torch.sum(x, dim=1)  # (batch_size, n_input)
+            elif self.scoring == "mean":
+                return torch.mean(x, dim=1)  # (batch_size, n_input)
+            elif self.scoring == "max":
+                return torch.max(x, dim=1).values  # (batch_size, n_input)
+            else:
+                raise NotImplementedError(
+                    f'scoring = {self.scoring} is not implemented. Has to be one of ["attn", "gated_attn", "mlp", "sum", "mean", "max"].'
+                    )
+            if self.scale:
+                if self.patient_batch_size is None:
+                    raise ValueError("patient_batch_size must be set when scale is True.")
+                A = A * A.shape[-1] / self.patient_batch_size
+
+            pooled = torch.bmm(A, x).squeeze(dim=1)  # (batch_size, n_input)
