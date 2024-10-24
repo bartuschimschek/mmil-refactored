@@ -135,9 +135,11 @@ class MultiVAETorch(BaseModuleClass):
             self.activation = nn.LeakyReLU
         elif activation == "tanh":
             self.activation = nn.Tanh
+        elif activation == "relu":
+            self.activation = nn.ReLU
         else:
             raise NotImplementedError(
-                f'activation should be one of ["leaky_relu", "tanh"], but activation={activation} was passed.'
+                f'activation should be one of ["leaky_relu", "tanh", "relu"], but activation={activation} was passed.'
             )
 
         # TODO: add warnings that mse is used
@@ -569,33 +571,6 @@ class MultiVAETorch(BaseModuleClass):
             kl_local=kl_loss,
             extra_metrics=extra_metrics,
         )
-
-    # @torch.inference_mode()
-    # def sample(self, tensors, n_samples=1):
-    #     """Sample from the generative model.
-
-    #     Parameters
-    #     ----------
-    #     tensors
-    #         Tensor of values.
-    #     n_samples
-    #         Number of samples to generate.
-
-    #     Returns
-    #     -------
-    #     Generative outputs.
-    #     """
-    #     inference_kwargs = {"n_samples": n_samples}
-    #     with torch.inference_mode():
-    #         (
-    #             _,
-    #             generative_outputs,
-    #         ) = self.forward(
-    #             tensors,
-    #             inference_kwargs=inference_kwargs,
-    #             compute_loss=False,
-    #         )
-    #     return generative_outputs["rs"]
 
     def _calc_recon_loss(self, xs, rs, losses, group, size_factor, loss_coefs, masks):
         loss = []
