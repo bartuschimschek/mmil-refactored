@@ -16,8 +16,8 @@ maintainers = [
     {name = "Anastasia Litinetskaya", email = "alitinet@gmail.com"},
 ]
 urls.Documentation = "https://multimil.readthedocs.io/"
-urls.Source = "https://github.com/theislab/multimil"
-urls.Home-page = "https://github.com/theislab/multimil"
+urls.Source = "https://github.com/bartuschimschek/mmil-refactored"
+urls.Home-page = "https://github.com/bartuschimschek/mmil-refactored"
 dependencies = [
     "anndata==0.10.8",
     "numpy<2.0",
