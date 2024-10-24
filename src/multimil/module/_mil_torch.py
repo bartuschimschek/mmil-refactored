@@ -4,8 +4,8 @@ from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from torch import nn
 from torch.nn import functional as F
 
-#from multimil.nn import MLP, Aggregator
-#from multimil.utils import prep_minibatch, select_covariates
+from multimil.nn import MLP, Aggregator
+from multimil.utils import prep_minibatch, select_covariates
 
 class MILClassifierTorch(BaseModuleClass):
     """MultiMIL's MIL classification module.
