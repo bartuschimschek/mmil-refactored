@@ -4,8 +4,8 @@ from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from torch import nn
 from torch.nn import functional as F
 
-from multimil.nn import MLP, Aggregator
-from multimil.utils import prep_minibatch, select_covariates
+#from multimil.nn import MLP, Aggregator
+#from multimil.utils import prep_minibatch, select_covariates
 
 class MILClassifierTorch(BaseModuleClass):
     """MultiMIL's MIL classification module.
@@ -92,9 +92,11 @@ class MILClassifierTorch(BaseModuleClass):
             self.activation = nn.LeakyReLU
         elif activation == "tanh":
             self.activation = nn.Tanh
+        elif activation == "relu":
+            self.activation = nn.ReLU
         else:
             raise NotImplementedError(
-                f'activation should be one of ["leaky_relu", "tanh"], but activation={activation} was passed.'
+                f'activation should be one of ["leaky_relu", "tanh", "relu"], but activation={activation} was passed.'
             )
 
         self.class_loss_coef = class_loss_coef
