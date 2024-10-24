@@ -1,5 +1,6 @@
 import logging
-from typing import Literal
+from typing import Literal, Union
+
 
 import anndata as ad
 import torch
