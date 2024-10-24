@@ -1,7 +1,6 @@
 import torch
 from scvi import REGISTRY_KEYS
 from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
-
 from multimil.module import MILClassifierTorch, MultiVAETorch
 
 class MultiVAETorch_MIL(BaseModuleClass):
