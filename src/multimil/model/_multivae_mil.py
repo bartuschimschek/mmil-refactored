@@ -1,5 +1,6 @@
 import logging
 import warnings
+from typing import Union
 
 import anndata as ad
 import torch
